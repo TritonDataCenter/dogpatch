@@ -1,7 +1,7 @@
 = RAS specifications
 :author: Robert Mustacchi
 :email: rm@joyent.com
-:revnumber: 0.0.1
+:revnumber: 0.1.0
 :toc: left
 :sectnums:
 
@@ -370,6 +370,18 @@ for mapping between the silkscreen socket information on the system
 board and the information that is provided by the processor via CPUID.
 For more information, see <<proposal-cpu>>.
 
+===== Automatic Replacement
+
+When a fault occurs on a CPU and it is replaced, we'd like to be able to
+know that the CPU has actually been replaced by a new unit without an
+operator's manual intervention. To do this, we need something such as a
+serial number that can be associated with a CPU. This serial number like
+information does not need to be generally accessible as the original
+portion that was available via CPUID in the Pentium III was.
+Technologies such as Intel PPIN can often serve as a source for a
+synthetic identifier. For more information on how this is used, see
+<<rfd-137,RFD 137>>.
+
 ==== Firmware
 
 CPUs have firmware that comes in the form of microcode. It is expected
@@ -479,7 +491,7 @@ corresponding physical slot.
 
 SMBIOS provides a Location Tag which is useful for being able to
 determine where a given DIMM physically is. However, this is not
-sufficient. Critically we are missing a programatic way of mapping
+sufficient. Critically we are missing a programmatic way of mapping
 between an SMBIOS type 17 entry or SPD data for a DIMM and the
 corresponding information from the memory controller.
 
@@ -520,7 +532,7 @@ nexus for all of the different parts of the system. It accepts power,
 has sockets for the CPU, DIMMs, and expansion devices. There are many
 headers on it which allow it to be connected to additional devices.
 
-=== Silkscreen labels
+==== Silkscreen labels
 
 All connectors and slots on the system board must be labelled with a
 silkscreen. The labelling should be clear and it should be obvious as to
@@ -1941,15 +1953,21 @@ service that's available at run-time.
 
 == Revision History
 
-[cols="3*"]
+[cols="3*",adoc]
 |===
 | **Version**
 | **Release Date**
 | **Changes**
 
+| 0.1.0
+| 30 April 2018
+a| * 'Silkscreen labels' is denoted with incorrect header.
+* Added 'Automatic Replacement' section to '5.1.2. Identification'.
+* Various typos fixed.
+
 | 0.0.1
 | 23 March 2018
-| Initial Revision
+a| * Initial Revision
 
 |===
 
@@ -1983,6 +2001,9 @@ service that's available at run-time.
 - [[[pmbus]]] Power System Management Protocol Specification
   http://www.pmbus.org/Specifications/CurrentSpecifications
   Revision 1.3.1 13 March 2015.
+
+- [[[rfd-137]]] RFD 137: CPU Autoreplacement and ID Synthesis
+  https://github.com/joyent/rfd/tree/master/rfd/0137
 
 - [[[smbus]]] System Management Bus (SMBus) Specification
   http://www.smbus.org/specs/SMBus_3_0_20141220.pdf
