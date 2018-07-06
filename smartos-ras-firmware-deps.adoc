@@ -1,0 +1,514 @@
+
+= SmartOS Firmware Dependencies
+:author: Rob Johnston
+:email: rob.johnston@joyent.com
+:revnumber: 0.2
+{doctime}
+:toc: left
+:sectnums:
+
+////
+    This Source Code Form is subject to the terms of the Mozilla Public
+    License, v. 2.0. If a copy of the MPL was not distributed with this
+    file, You can obtain one at http://mozilla.org/MPL/2.0/.
+
+    Copyright 2018 Joyent Inc
+////
+
+last modified: {doctime}, {docdate}
+
+== Overview
+
+This document is an attempt to record the set of dependencies that the RAS featureset of SmartOS has on various firmware constructs.
+
+In many ways it is a companion to Joyent RAS Specification.  Thus, in an effort to avoid duplication this document will reference, where appropriate, sections of the RAS Specification to provide additional background information.  That specfication can be found at the URL below:
+
+https://eng.joyent.com/ras/RAS.pdf
+
+== HW Topology
+
+The hardware fault management support within SmartOS depends heavily on the ability of the OS to both enumerate the hardware components of the system and to understand the FRU boundaries of those components and how those FRUs are physically interconnected.
+
+The OS library responsible for generating this view of the system is libtopo.  Libtopo creates a data structure known as a the topo snapshot or topo tree.  The topo snapshot is a tree-like representation of the hardware components of the system.  Each hardware component in the system is represented by a node in the tree and the parent-children relationship of the nodes, models the physical interconnection of the hardware components.  For example, a theoretical topo snapshot could have a chassis node at the root, with a child motherboard node which, in turn, may may some number of child chip nodes (representing the processors).  Nodes within the tree are identified by a node name and instance number.  The node namespace is canonized and represents the type of hardware component that the node represents.  The node instance number is zero-based and intended simply to uniquefy nodes of the same type at the same level of the tree.  Each node can contain a set of properties further describing the hardware component.  Libtopo provides interfaces for generating the topo snapshot, walking the tree and accessing the value of properties on the nodes.
+
+Libtopo is modular by nature and much of its functionality is implemented by a set of plugin modules (known as enumerator modules) that are responsible to enumerating various subtree's within the larger topo tree.  For example, the "chip" enumerator module enumerates the "chip" subtree, which encompasses the processors, cores and strands.  The disk enumerator module enumerates attached disks.  Other modules enumerate PCI/PCIe devices or power supplies and fans, etc.
+
+The generation of the topo snapshot is driven by per-platform XML files known as topo maps.  The topo maps define the sequence in which the enumerator modules are loaded and executed.  Additionally, for cases where it is not possible to programatically discover a given piece of hardware, the topo map can a contain a static definition of the corresponding node in the tree.
+
+The topo tree can be dumped via the following CLI (must be run as root):
+
+    /usr/lib/fm/fmd/fmtopo
+
+=== Libtopo and Indicators
+
+Higher-level management software in SmartOS requires the ability to retrieve and toggle the state of the chassis LEDs for the purposes of identifying or indicating the status of the chassis or one or more individual component.  Libtopo supports the notion of enumerating "indicator" nodes in the topo snapshot to model this functionality.  An indicator is intended to be an abstraction representing one or more LEDs on the hardware component.  Three types of indicators are supported:
+
+* locate
+* fault
+* ok2rm
+
+In some cases a given indicator will in fact correspond directly to a dedicated physical LED.  In other cases, a single LED may be overloaded to support multiple types of indicators.  For example, disk drive bays often do not have separate locate and fault LEDs.  Instead, a single LED may be used with a solid-on or blinking state indicating either fault or locate, respectively.  Similarly, a given indictor could correspond to multiple physical LEDs.  For example, setting the chassis fault indicator to ON may result in amber LEDs being illuminated on both the front and back of the chassis.
+
+
+== Firmware Dependencies
+
+The Libtopo enumerator modules depend on a number of data structures provided by various bits of firmware, in order to discover hardware and manipulate sensors and LEDs.  These data structures include:
+
+* SMBIOS Tables
+* IPMI FRU Inventory
+* IPMI Sensors Data Repository (SDR)
+* SES Diagnostic and Status Pages
+
+The sections below describe our dependencies on the above data structures.
+
+
+=== SMBIOS Dependencies
+
+SMBIOS is a DMTF standard that describes defines a set of tables and record types for describing the physical inventory of a system.  See section 4.1 of the RAS specification for more information.
+
+The smbios pseudo-driver in SmartOS provides a read-only interface to these tables and libsmbios provides higher-level software with interfaces to read the tables and parse the records.
+
+Administrators can dump the contents of those tables with the smbios(1m) CLI.  Currently, libtopo depends on the contents of the following record types:
+
+==== Type 0 Record
+
+The Type 0 record stores attributes of the installed BIOS.  See section 7.1 of the SMBIOS specification.  The following fields are consumed by the smbios enumerator module:
+
+    Vendor
+    BIOS Version String
+    BIOS Release Date
+
+This information is consumed by the smbios enumerator module to populate the following node properties in the "motherboard-properties" property group, as part of enumerating the motherboard node in the topo snapshot:
+
+    firmware-vendor
+    firmware-revision
+    firmware-release-date
+
+==== Type 1 Record
+
+The Type 1 record stores attributes of the overall system.  See section 7.2 of the SMBIOS specification.  The following field is consumed by the core libtopo code:
+
+    Product Name
+
+This value of this field is used as value the "product-id" field in the FMRI authority.  This value is crucial to libtopo as the selection of which XML topo map to use for driving enumeration is keyed by this value.
+
+* Joyent requires that a mechanism be provided such that the value of the "Product Name" field can customized.
+
+==== Type 2 Record
+
+The Type 2 record stores information about the motherboard.  See section 7.3 of the SMBIOS specification.  The smbios enumerator module consumes the following fields:
+
+    Manufacturer
+    Product
+    Asset Tag
+
+This information is consumed by the smbios enumerator module to populate the following node properties in the "motherboard-properties" property group, as part of enumerating the motherboard node.
+
+    manufacturer
+    product-id
+    asset-tag
+
+Finally, the "Serial Number" and "Version" fields of the type 2 record are used to populate the "serial" and "revision" fields in the authority portion of the motherboard node FMRI.
+
+
+==== Type 9 Records
+
+The Type 9 records store information about expansion slots.  See section 7.10 of the SMBIOS specification.  The pcibus enumerator module consumes the following fields:
+
+    Slot Designation
+    Slot ID
+
+The value of the Slot ID is used as a cross-reference key with PCI/PCIe devices that are discovered by the pcibus enumerator module while walking the device tree.  If the value of "Slot ID" matches the slotnum then the value of the "Slot Designation" field is used to set the label property for the corresponding "pcidev" or "pciexdev" node in the topo snapsnot.
+
+* The value of the "Slot Designation" field should match the silscreened label on the motherboard.
+
+==== Type 17 Records
+
+Type 17 records describe memory devices (i.e. DIMMs).  See section 7.18 of the SMBIOS specification.  On X86 systems that lack a functioning memory controller driver (currently anything post Sandy Bridge), we leverage the contents of the type 17 records to enumerate the DIMM slots and any installed DIMMs.  This code lives in the smbios enumerator module.    The smbios enumerator module consumes the following fields:
+
+    Form Factor
+
+This information is used to populate the following node properties in the "dimm-slot" property group, as part of enumerating "slot" nodes in the topo snapshot:
+
+    form-factor
+
+Additionally, the smbios enumerator modules consumes the following fields from the Type 17 records:
+
+    Size
+    Type
+    Rank
+    Configured Memory Clock Speed
+    Speed
+    Configured voltage
+    Manufacturer
+    Asset Tag
+    Device Locator
+
+This information is used to populate the following node properties in the "dimm-properties" property group, as part of enumerating "dimm" nodes in the topo snapshot:
+
+    size
+    type
+    rank
+    configured-speed
+    maximum-speed
+    configured-voltage
+    manufacturer
+    asset-tag
+    location
+
+Finally, the "Serial Number" and "Part Number" fields of the type 17 record are used to populate the "serial" and "part" fields in the authority portion of the dimm node FMRI.
+
+* For unpopulated DIMM slots, the value of the Size field should be 0.
+
+* The value of the "Device Locator" field should match the silscreened label on the motherboard.
+
+=== IPMI Dependencies
+
+On modern server platforms, there is a subset of hardware that is not directly discoverable by the operating system.  Often this is because the devices are only accesible via a private I2C-like bus behind the service processor.  As such, there are no kernel drivers for this hardware and no corresponding device nodes in the device tree.  In those cases, we rely on data structures exported by the service processor firmware to discover the hardware.  Additionally, in order to access and/or manipulate the state of those components, the requests need to be proxied through the SP.  Some examples of hardware components that are discovered via the SP are:
+
+* power supplies
+* fans
+* sensors
+* LEDs
+* the service processor, itself
+
+IPMI is a protocol for performing out-of-band management of the hardware platform that is supported by most service processors.  See section 4.2 of the RAS specification for more background.  The IPMI protocol defines a set of commands and data structure used for hardware managment.  This section describes the specific dependencies that SmartOS has on the IPMI command set.
+
+==== IPMI Sensor Data Repository
+
+SmartOS relies on the behavior documented in the IPMI specification of the following IPMI commands in access the Sensor Data Repository.
+
+.IPMI SDR Commands
+|===
+| Command Name | netfn | cmd | Specification Reference
+
+|GET SDR INFO
+|0x0a
+|0x20
+|33.9
+
+|RESERVE SDR REPOSITORY
+|0x0a
+|0x22
+|33.11
+
+|GET SDR
+|0x0a
+|0x23
+|33.12
+
+|GET SENSOR THRESHOLDS
+|0x0a
+|0x27
+|35.9
+
+|GET SENSOR READING
+|0x0a
+|0x2d
+|35.14
+|===
+
+Every sensor accessible to the Service Processor should be exposed via a record in the SDR.
+
+Unfortunately, some broken IPMI implementations will set the entity type for all sensors to some common entity like 0x17 (SYSTEM_CHASSIS) or 0x7 (MOTHERBOARD).
+
+In order to programatically determine the relationship between an SDR record and the hardware component that it is related to, it is important that the Entity Type and Instance values are set correctly.  For example, an SDR record representing a voltage sensor on the first power supply should and the Entity ID set to 0xa and the Entity Instance set to 0.
+
+==== IPMI FRU Inventory
+
+The IPMI Standard defines a common record format for encoding FRU identity information.  Typically this information is stored in EEPROMs on the FRUs.  These records are read out of the EEPROMs by the service processor firmware.  The service processor creates a FRU locator entry in the Sensor Data Repository for each FRU record.  The FRU locator can be used as an opaque handle to access the records contents.
+
+SmartOS relies on the behavior documented in the IPMI specification of the following IPMI commands in order to access the FRU Inventory.
+
+.IPMI FRU Inventory Commands
+|===
+| Command Name | netfn | cmd | Specification Reference
+
+|GET FRU INVENTORY AREA
+|0x0a
+|0x10
+|34.1 
+
+|READ FRU DATA
+|0x0a
+|0x11
+|34.2 
+|===
+
+
+===== Power Supplies
+
+A FRU record should exist for each installed power supply.  At a minimun, the Product Info Area of those records should have the following fields populated with valid values:
+
+* Manufacturer Name
+* Product Name
+* Product Serial Number
+
+===== Fans
+
+See section 5.13 of the RAS Specification for background.  Typically FANs do not have a 
+EEPROMs, so it's not practical to discover them via an IPMI FRU inventory record.
+
+Thus, SmartOS will attempt to discover any installed fans by looking for Full or Compact Sensor records in the SDR that are of type 0x1d (FAN) - for example, a sensor record for a fan tachometer.
+
+For cases where multiple fans are part of a single FRU module, an Entity Association (EA) record should exist with Entity Type 0x1E (COOLING_DOMAIN) that references the entity ID/instances of the fans contained within the larger FRU.  This is necessary so that the libtopo snapshot can properly reflect the FRU boundaries of the hardware components.
+
+===== Service Processor
+
+SmartOS relies on the behavior documented in the IPMI specification for the GET DEVICEID command (netfn: 0x06 cmd: 0x01) in order to be able to retrieve the version of the LOM firmware.  See section 20.1 of the IPMI Specification for more details.
+
+SmartOS relies on the behavior documented in the IPMI specification of the following IPMI commands in order to be able to discover and configure the network configuration of the service processor.
+
+.IPMI Network Configuration Commands
+|===
+| Command Name | netfn | cmd | Specification Reference
+
+|GET CHANNEL AUTH CAPS
+|0x06
+|0x38
+|22.24 
+
+|GET CHANNEL INFO
+|0x06
+|0x42
+|22.24 
+
+|GET LAN CONFIG
+|0x0c
+|0x01
+|23
+
+|SET LAN CONFIG
+|0x0c
+|0x02
+|23
+|===
+
+
+===== Chassis Locate Indicator
+
+SmartOS depends on the documented behavior in the IPMI specification for the following IPMI commands in order to get and set the state of the chassis locate indicator.
+
+.IPMI Chassis Identify Commands
+|===
+| Command Name | netfn | cmd | Specification Reference
+
+|GET CHASSIS STATUS
+|0x00
+|0x01
+|28.2
+
+|CHASSIS IDENTIFY
+|0x00
+|0x04
+|28.5
+|===
+
+===== Platform Management
+
+SmartOS relies on the documented behavior in the IPMI specification of the following IPMI commands for the purposes of managing the power state of the host and recovering from certain classes of failures.
+
+.IPMI Platform Management Commands
+|===
+| Command Name | netfn | cmd | Specification Reference
+
+|CHASSIS CONTROL
+|0x00
+|0x02
+|28.3
+
+|CHASSIS RESET
+|0x00
+|0x03
+|28.4
+
+|COLD RESET
+|0x06
+|0x02
+|20.2
+
+|WARM RESET
+|0x06
+|0x03
+|20.3
+|===
+
+===== SEL Management
+
+SmartOS relies on the documented behavior in the IPMI specification of the following IPMI commands for the purposes of retrieving data from the IPMI System Event Log (SEL)
+
+.IPMI SEL Management Commands
+|===
+| Command Name | netfn | cmd | Specification Reference
+
+|GET SEL INFO
+|0x0a
+|0x40
+|31.2
+
+|GET SEL ENTRY
+|0x0a
+|0x43
+|31.5
+
+|GET SEL TIME
+|0x0a
+|0x48
+|31.10
+
+|SET SEL TIME
+|0x0a
+|0x49
+|31.11
+
+|GET SEL UTC OFFSET
+|0x0a
+|0x5c
+|31.11
+
+|SET SEL UTC OFFSET
+|0x0a
+|0x5d
+|31.11
+|===
+
+
+===== General
+
+In the event that OEM IPMI commands exist in order to implement critical platform management functions, we require that the specification of these IPMI commands be provided to Joyent Engineering for the purposes of extending our management software to leverage these commands.
+
+=== SES Dependencies
+
+SmartOS leverages SCSI Enclosure Services (SES) to do the following:
+
+* enumerate hardware components in a storage enclosure
+* get/set the state of LEDs in a storage enclosure
+* get the state of sensors in a storage enclosure
+
+Addiitionally, while SmartOS takes an active role in detecting and diagnosing disk-related faults, it relies on the enclosure services processor to monitor and detect faults in the ancillary components of the storage enclosure (e.g. fans, power supplies).
+
+==== Drive Bays
+
+* Setting the RQST FAULT bit to 1/0 in the Device Slot/Array Device Slot Control Element should cause the associated drive bay Fault indicator to turn on/off, respectively.
+
+* The current state of the Fault indicator should be reflected by the FAIL bit in Device Slot/Array Device Slot Status Element.
+
+* Setting the RQST REMOVE bit to 1/0 in the Device Slot/Array Device Slot Control Element should cause the associated drive bay OK2rm indicator to turn on/off, respectively.
+
+* The current state of the OK2RM indicator should be reflected by the RMV bit in the Device Slot/Array Device Slot Status Element.
+
+* Setting the RQST IDENT bit to 1/0 in the Device Slot/Array Device Slot Control Element should cause the associated drive bay Identify indicator to turn on/off, respectively.
+
+* The current state of the Identify indicator should be reflected by the IDENT bit in the Device Slot/Array Device Slot Status Element.
+
+* SmartOS requires the ability to manipulate the state of the drive bay LEDs even when a drive is not physically present.
+
+==== Power Supplies
+
+* Setting the RQST IDENT bit to 1/0 in the Power Supply Control Element should cause the associated power supply Identify indicator to turn on/off, respectively.
+
+* The current state of the Identify indicator should be reflected by the IDENT bit in the associated Power Supply Status Element.
+
+* The enclosure services process should actively monitor the health of the power supplies.  If a power supply is determined to be faulty, the FAIL bit in the associated Power Supply Status Element should be set to 1.
+
+==== Fans
+
+* Setting the RQST IDENT bit to 1/0 in the Cooling Control Element should cause the associated fan Identify indicator to turn on/off, respectively.
+
+* The current state of the Identify indicator should be reflected by the IDENT bit in the associated Cooling Status Element.
+
+* The enclosure services process should actively monitor the health of the fans.  If a fan is determined to be faulty, the FAIL bit in the associated Cooling Status Element should be set to 1.
+
+
+==== Chassis/Enclosure
+
+* Setting the RQST IDENT bit to 1/0 in the Enclosure Control Element should cause the chassis Identify indicator to turn on/off, respectively.
+
+==== General
+
+* The Element Descriptor Diagnostic Page (07h) should be implemented.  For SES elements that correspond to FRUs, the string descriptor should be consistent with the externally visible label on the system.
+
+=== Firmware Upgrade Dependencies
+
+We require the ability to both upgrade and downgrade the firmware for the following components from within SmartOS:
+
+* Disk Drives (HDD and SSD)
+* IOM modules (i.e. SAS expanders)
+* Service Processor Firmware
+* PCIe Expansion card (HBA) firmware
+
+Ideally, a native tool should exist so that the firmware of the component in question can be loaded
+without the need to boot into a seperate operating environment.  In leau of such a tool, specifications
+should be provided by the vendor so that such a tool could be developed by Joyent Engineering.
+
+Furthermore, in order to facilitate internal testing of firmware upgrade procedures, we require that
+at least two firmware images be made available for each component.
+
+=== General Firmware Dependencies
+
+A given hardware component may be exposed via multiple firmware data structures.  For example, a
+power supply may be exposed via both an IPMI FRU record and an SES Element.  In such cases, it
+is important that the string description of the component is consistent between the different structures
+so that software can correlate them together.
+
+== References
+
+=== Source Code References
+
+All of the source code references below are relative to the illumos-joyent git repository:
+
+https://github.com/joyent/illumos-joyent/
+
+==== Libtopo
+
+Core libtopo code:
+
+    usr/src/lib/fm/topo/libtopo/
+
+Enumerator modules:
+
+    usr/src/lib/fm/topo/modules/
+
+Topo maps:
+
+    usr/src/lib/fm/topo/maps/
+
+==== IPMI
+
+ipmi enumerator module:
+
+    usr/src/lib/fm/topo/modules/common/ipmi/
+
+ipmitopo:
+
+    usr/src/cmd/fm/ipmitopo/
+
+libipmi:
+
+    usr/src/lib/libipmi/common/
+    
+==== SES
+
+ses enumerator module:
+
+    usr/src/lib/fm/topo/modules/common/ses/
+
+libses:
+
+    usr/src/lib/scsi/libses/
+    usr/src/lib/scsi/plugins/ses/
+
+
+=== Documentation References
+
+==== Fault Manager Programmer's Reference Manual (FMDPRM)
+
+==== IPMI
+
+https://www.intel.com/content/www/us/en/servers/ipmi/ipmi-second-gen-interface-spec-v2-rev1-1.html
+
+==== SMBIOS
+
+http://www.dmtf.org/standards/smbios
+
+
