@@ -2,7 +2,7 @@
 = SmartOS Firmware Dependencies
 :author: Rob Johnston
 :email: rob.johnston@joyent.com
-:revnumber: 0.2
+:revnumber: 0.3
 {doctime}
 :toc: left
 :sectnums:
@@ -60,7 +60,6 @@ The Libtopo enumerator modules depend on a number of data structures provided by
 * SES Diagnostic and Status Pages
 
 The sections below describe our dependencies on the above data structures.
-
 
 === SMBIOS Dependencies
 
@@ -304,6 +303,8 @@ SmartOS depends on the documented behavior in the IPMI specification for the fol
 |28.5
 |===
 
+*Note:* For cases where a given platform supports both IPMI and SES (e.g. a hybrid storage server), this requirement is optional, as long as it is possible to get and set the state of the chassis identify indicator via SES.
+
 ===== Platform Management
 
 SmartOS relies on the documented behavior in the IPMI specification of the following IPMI commands for the purposes of managing the power state of the host and recovering from certain classes of failures.
@@ -316,11 +317,6 @@ SmartOS relies on the documented behavior in the IPMI specification of the follo
 |0x00
 |0x02
 |28.3
-
-|CHASSIS RESET
-|0x00
-|0x03
-|28.4
 
 |COLD RESET
 |0x06
